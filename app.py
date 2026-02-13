@@ -1,339 +1,294 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "id": "bb84e1dd-02db-42d5-8360-17d2902836fc",
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "import streamlit as st\n",
-    "import pandas as pd\n",
-    "import numpy as np\n",
-    "import eikon as ek\n",
-    "import plotly.express as px\n",
-    "import plotly.graph_objects as go\n",
-    "from transformers import pipeline\n",
-    "import re\n",
-    "from datetime import datetime, timedelta\n",
-    "import warnings\n",
-    "\n",
-    "warnings.filterwarnings('ignore')\n",
-    "\n",
-    "# ==========================================\n",
-    "# 1. CORE SETUP & CONCALL.IN UI/UX\n",
-    "# ==========================================\n",
-    "st.set_page_config(page_title=\"Corporate Narrative Analyzer\", layout=\"wide\", initial_sidebar_state=\"expanded\")\n",
-    "\n",
-    "# Modern SaaS / Concall.in Light Theme CSS\n",
-    "st.markdown(\"\"\"\n",
-    "    <style>\n",
-    "    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');\n",
-    "    \n",
-    "    .stApp { background-color: #f3f4f6; color: #1f2937; font-family: 'Inter', sans-serif; }\n",
-    "    h1, h2, h3, h4 { color: #111827; font-weight: 600; }\n",
-    "    \n",
-    "    /* Clean Card UI for Metrics and Visuals */\n",
-    "    div[data-testid=\"metric-container\"] {\n",
-    "        background-color: #ffffff;\n",
-    "        border: 1px solid #e5e7eb;\n",
-    "        border-radius: 8px;\n",
-    "        padding: 15px;\n",
-    "        box-shadow: 0 1px 3px rgba(0,0,0,0.05);\n",
-    "    }\n",
-    "    \n",
-    "    /* Buttons */\n",
-    "    .stButton>button { \n",
-    "        background-color: #4f46e5; color: white; border-radius: 6px; \n",
-    "        font-weight: 500; border: none; transition: 0.2s;\n",
-    "    }\n",
-    "    .stButton>button:hover { background-color: #4338ca; color: white; }\n",
-    "    \n",
-    "    /* Tabs (Concall.in Style) */\n",
-    "    .stTabs [data-baseweb=\"tab-list\"] { gap: 10px; background-color: transparent; }\n",
-    "    .stTabs [data-baseweb=\"tab\"] { \n",
-    "        background-color: #ffffff; border: 1px solid #e5e7eb; border-bottom: none;\n",
-    "        border-radius: 6px 6px 0 0; padding: 10px 20px; color: #6b7280; font-weight: 500;\n",
-    "    }\n",
-    "    .stTabs [aria-selected=\"true\"] { \n",
-    "        background-color: #f3f4f6; color: #4f46e5; border-top: 3px solid #4f46e5;\n",
-    "    }\n",
-    "    \n",
-    "    /* Dataframes */\n",
-    "    .dataframe { border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }\n",
-    "    </style>\n",
-    "\"\"\", unsafe_allow_html=True)\n",
-    "\n",
-    "# ==========================================\n",
-    "# 2. THE AI NLP PIPELINE (CACHED)\n",
-    "# ==========================================\n",
-    "@st.cache_resource(show_spinner=False)\n",
-    "def load_ai_models():\n",
-    "    \"\"\"Loads Advanced Hugging Face Transformers into memory.\"\"\"\n",
-    "    return {\n",
-    "        \"sentiment\": pipeline(\"sentiment-analysis\", model=\"ProsusAI/finbert\"),\n",
-    "        \"summarizer\": pipeline(\"summarization\", model=\"facebook/bart-large-cnn\"),\n",
-    "        \"aspect\": pipeline(\"zero-shot-classification\", model=\"facebook/bart-large-mnli\"),\n",
-    "        \"ner\": pipeline(\"ner\", model=\"dslim/bert-base-NER\", aggregation_strategy=\"simple\")\n",
-    "    }\n",
-    "\n",
-    "# ==========================================\n",
-    "# 3. DATA EXTRACTION (TIME-BOUND)\n",
-    "# ==========================================\n",
-    "@st.cache_data(show_spinner=False)\n",
-    "def fetch_narrative_data(api_key, ticker, days):\n",
-    "    end_date = datetime.today()\n",
-    "    start_date = end_date - timedelta(days=days)\n",
-    "    \n",
-    "    try:\n",
-    "        ek.set_app_key(api_key)\n",
-    "        df_news = ek.get_news_headlines(\n",
-    "            query=f\"R:{ticker} AND Language:LEN\", \n",
-    "            date_from=start_date.strftime('%Y-%m-%d'),\n",
-    "            date_to=end_date.strftime('%Y-%m-%d'),\n",
-    "            count=100\n",
-    "        )\n",
-    "        \n",
-    "        transcript_raw = ek.get_data(instruments=[ticker], fields=['TR.EventTranscript'])\n",
-    "        if pd.isna(transcript_raw[0].iloc[0]['EventTranscript']):\n",
-    "            raise ValueError(\"Transcript restricted.\")\n",
-    "            \n",
-    "        return df_news, {\"Latest Quarter\": str(transcript_raw[0].iloc[0]['EventTranscript'])}\n",
-    "\n",
-    "    except Exception as e:\n",
-    "        # --- MOCK FALLBACK ---\n",
-    "        st.warning(f\"⚠️ Eikon Premium API Access Offline. Booting Simulation Data for {ticker}.\")\n",
-    "        \n",
-    "        mock_headlines = [\n",
-    "            f\"{ticker} reports surge in OTT subscriber base, offsetting traditional multiplex drops.\",\n",
-    "            f\"SEBI regulations delay {ticker}'s proposed network merger by another three months.\",\n",
-    "            f\"Analysts upgrade {ticker} following aggressive content acquisition strategy.\",\n",
-    "            f\"Ad-revenue challenges in the mid-cap broadcast space continue to pressure {ticker}.\",\n",
-    "            f\"Management at {ticker} announces major pivot to direct-to-consumer digital models.\"\n",
-    "        ] * (days // 5 + 2)\n",
-    "        \n",
-    "        dates = pd.date_range(start=start_date, end=end_date, periods=len(mock_headlines))\n",
-    "        df_news = pd.DataFrame({\"versionCreated\": dates, \"text\": mock_headlines}).set_index(\"versionCreated\")\n",
-    "        \n",
-    "        transcripts_4q = {\n",
-    "            \"Q4 (Latest)\": f\"Good morning. {ticker} had a transformative Q4. Our OTT digital platforms saw a 22% surge in active users, directly cannibalizing traditional linear TV and cinema viewership as we predicted. We are aggressively deploying machine learning algorithms to reduce telecom churn and improve targeted ad-spends. This digital transformation will be our primary revenue driver moving into FY27. However, changes in compliance frameworks regarding our pending merger have created short-term friction.\",\n",
-    "            \"Q3\": f\"Welcome to the Q3 call. Top-line revenue remained flat this quarter. While our traditional broadcast networks faced ad-spend headwinds, our investments in streaming infrastructure are yielding strong cash flow. We anticipate closing the strategic merger by Q4, which will unlock significant synergies in our content library. We plan to aggressively expand our digital footprint in tier-2 cities.\",\n",
-    "            \"Q2\": f\"Q2 was an investment phase for {ticker}. We incurred heavy upfront costs acquiring streaming rights to major sporting events to bolster our OTT offering. We expect these investments to yield high double-digit subscriber growth. We are strictly monitoring our balance sheet and will execute cost-cutting measures in our legacy cinema-distribution arms to fund this digital pivot.\",\n",
-    "            \"Q1\": f\"Starting the fiscal year, {ticker} delivered steady Q1 results. Our legacy media assets provided a strong cash baseline. We have initiated a strategic review of our portfolio to address the rapidly changing entertainment landscape. We project that over the next 12 to 18 months, capital allocation will shift heavily away from traditional cinema and into proprietary digital streaming technologies.\"\n",
-    "        }\n",
-    "        return df_news, transcripts_4q\n",
-    "\n",
-    "# ==========================================\n",
-    "# 4. SIDEBAR CONTROLS\n",
-    "# ==========================================\n",
-    "with st.sidebar:\n",
-    "    st.markdown(\"### 🔑 LSEG Connect\")\n",
-    "    eikon_key = st.text_input(\"Eikon API Key\", type=\"password\", value=\"67b7adc5bde14aa5b3a152068a7e4e7030b30275\")\n",
-    "    \n",
-    "    st.markdown(\"### 📊 Parameters\")\n",
-    "    ticker_input = st.text_input(\"NSE Ticker ID\", value=\"ZEEL.NS\").upper()\n",
-    "    horizon = st.selectbox(\"News Timeline\", [7, 30, 90, 180, 365], index=2, format_func=lambda x: f\"Last {x} Days\")\n",
-    "    \n",
-    "    st.caption(\"Concall Transcripts are strictly locked to Last 4 Quarters.\")\n",
-    "    run_btn = st.button(\"Analyze Narrative\", use_container_width=True)\n",
-    "    \n",
-    "    st.divider()\n",
-    "    # FIX 2: The Methodology Tab\n",
-    "    with st.expander(\"🔬 View Quant Methodology\"):\n",
-    "        st.markdown(\"\"\"\n",
-    "        **NLP Architecture:**\n",
-    "        * **Sentiment:** `ProsusAI/finbert` (Trained on 1.8M financial articles).\n",
-    "        * **Strategic Tagging:** `bart-large-mnli` (Zero-shot classification).\n",
-    "        * **Entity Linking:** `bert-base-NER` (Filtered for corporate stopwords).\n",
-    "        * **Summarization:** `bart-large-cnn` (Chunked for token-limit safety).\n",
-    "        \"\"\")\n",
-    "\n",
-    "# ==========================================\n",
-    "# 5. DASHBOARD EXECUTION & NLP\n",
-    "# ==========================================\n",
-    "if run_btn:\n",
-    "    with st.spinner(\"Processing NLP Pipelines (FinBERT, BART, NER)...\"):\n",
-    "        ai_models = load_ai_models()\n",
-    "        df_news, transcripts_4q = fetch_narrative_data(eikon_key, ticker_input, horizon)\n",
-    "\n",
-    "        # FIX 4: Zero-News Failsafe\n",
-    "        if df_news.empty:\n",
-    "            st.error(f\"No news events found for {ticker_input} in the last {horizon} days. Please expand your timeline.\")\n",
-    "            st.stop()\n",
-    "\n",
-    "        # ------------------------------------------\n",
-    "        # FEATURE 1: News Analysis\n",
-    "        # ------------------------------------------\n",
-    "        aspect_categories = [\"Digital Transformation\", \"Strategic Mergers\", \"Regulatory\", \"Financial Margins\"]\n",
-    "        aspect_counts = {k: 0 for k in aspect_categories}\n",
-    "        sentiment_data = []\n",
-    "        entity_sentiment_map = {} \n",
-    "        \n",
-    "        # FIX 3: NER Stop-Word Filter\n",
-    "        junk_entities = ['The', 'Board', 'Inc', 'Ltd', 'Company', 'Group', 'Management', 'Limited', 'Corp', 'SEBI']\n",
-    "        \n",
-    "        for index, row in df_news.iterrows():\n",
-    "            headline = str(row['text'])\n",
-    "            date_str = index.strftime('%b %d, %Y') if pd.notnull(index) else \"N/A\"\n",
-    "            \n",
-    "            # FinBERT Sentiment (With Truncation to prevent errors)\n",
-    "            sent_result = ai_models['sentiment'](headline, truncation=True, max_length=512)[0]\n",
-    "            label = sent_result['label'].capitalize()\n",
-    "            score_val = sent_result['score'] if label == 'Positive' else (-sent_result['score'] if label == 'Negative' else 0)\n",
-    "            \n",
-    "            # BART Aspect\n",
-    "            aspect_result = ai_models['aspect'](headline, candidate_labels=aspect_categories)\n",
-    "            dominant_aspect = aspect_result['labels'][0]\n",
-    "            aspect_counts[dominant_aspect] += 1\n",
-    "            \n",
-    "            # BERT NER with Stop-Word Filtering\n",
-    "            entities = ai_models['ner'](headline)\n",
-    "            for e in entities:\n",
-    "                if e['entity_group'] in ['ORG', 'PER']:\n",
-    "                    word = e['word'].replace(\"##\", \"\").strip()\n",
-    "                    if len(word) > 2 and word not in junk_entities:\n",
-    "                        if word not in entity_sentiment_map:\n",
-    "                            entity_sentiment_map[word] = []\n",
-    "                        entity_sentiment_map[word].append(score_val)\n",
-    "                \n",
-    "            sentiment_data.append({\n",
-    "                \"Date\": date_str, \"Headline\": headline, \"Strategic Aspect\": dominant_aspect,\n",
-    "                \"FinBERT Sentiment\": label, \"Confidence\": f\"{sent_result['score']:.2%}\"\n",
-    "            })\n",
-    "            \n",
-    "        df_analyzed_news = pd.DataFrame(sentiment_data)\n",
-    "        \n",
-    "        entity_records = []\n",
-    "        for ent, scores in entity_sentiment_map.items():\n",
-    "            if len(scores) >= 2:\n",
-    "                entity_records.append({\"Entity\": ent, \"Mentions\": len(scores), \"Average Sentiment\": np.mean(scores)})\n",
-    "        df_entities = pd.DataFrame(entity_records).sort_values(by=\"Mentions\", ascending=False).head(8)\n",
-    "\n",
-    "        # ------------------------------------------\n",
-    "        # FEATURE 2: 4-Quarter Transcript Engine\n",
-    "        # ------------------------------------------\n",
-    "        fls_keywords = ['expect', 'anticipate', 'will', 'future', 'project', 'guidance', 'forecast', 'plan', 'ahead']\n",
-    "        transcript_insights = {}\n",
-    "        \n",
-    "        for quarter, text in transcripts_4q.items():\n",
-    "            # Extract FLS\n",
-    "            sentences = [s.strip() + '.' for s in re.split(r'(?<=[.!?]) +', text) if len(s.split()) > 5]\n",
-    "            fls_sentences = [s for s in sentences if any(k in s.lower() for k in fls_keywords)]\n",
-    "            \n",
-    "            fls_data = []\n",
-    "            for s in fls_sentences:\n",
-    "                res = ai_models['sentiment'](s, truncation=True, max_length=512)[0]\n",
-    "                fls_data.append({\"Statement\": s, \"Sentiment\": res['label'].capitalize()})\n",
-    "            \n",
-    "            # FIX 1: The 512-Token Limit Fix (Chunking for BART)\n",
-    "            words = text.split()\n",
-    "            chunks = [' '.join(words[i:i+400]) for i in range(0, len(words), 400)] # Safe 400-word chunks\n",
-    "            \n",
-    "            chunk_summaries = []\n",
-    "            for chunk in chunks[:3]: # Analyze up to first 1200 words to save time\n",
-    "                out = ai_models['summarizer'](chunk, max_length=60, min_length=20, do_sample=False, truncation=True)\n",
-    "                chunk_summaries.append(out[0]['summary_text'])\n",
-    "                \n",
-    "            bullet_points = [s.strip() + '.' for s in \" \".join(chunk_summaries).split('.') if len(s.strip()) > 10][:3]\n",
-    "            \n",
-    "            transcript_insights[quarter] = {\"summary\": bullet_points, \"fls_df\": pd.DataFrame(fls_data), \"raw_text\": text}\n",
-    "\n",
-    "    # ==========================================\n",
-    "    # 6. UI RENDERING (CONCALL.IN STYLE)\n",
-    "    # ==========================================\n",
-    "    st.markdown(f\"## {ticker_input} Insights & Analysis\")\n",
-    "    st.caption(f\"News: **Last {horizon} Days** • Transcripts: **Last 4 Quarters**\")\n",
-    "    st.write(\"\") # Spacer\n",
-    "\n",
-    "    # --- SECTION 1: News & Entity Sentiment ---\n",
-    "    st.markdown(\"#### Entity & Aspect Intelligence\")\n",
-    "    \n",
-    "    c1, c2 = st.columns([1, 1.5])\n",
-    "    with c1:\n",
-    "        # Light Theme Radar Chart\n",
-    "        fig_radar = go.Figure(data=go.Scatterpolar(r=list(aspect_counts.values()), theta=list(aspect_counts.keys()), fill='toself', line_color='#4f46e5'))\n",
-    "        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=False), bgcolor='#ffffff'), margin=dict(t=20, b=20, l=20, r=20), height=280, template='plotly_white', paper_bgcolor='rgba(0,0,0,0)')\n",
-    "        st.plotly_chart(fig_radar, use_container_width=True)\n",
-    "        \n",
-    "    with c2:\n",
-    "        if not df_entities.empty:\n",
-    "            # Light Theme Scatter Chart\n",
-    "            fig_elsa = px.scatter(df_entities, x=\"Mentions\", y=\"Average Sentiment\", text=\"Entity\", size=\"Mentions\", \n",
-    "                                  color=\"Average Sentiment\", color_continuous_scale=['#ef4444', '#9ca3af', '#10b981'], range_color=[-1, 1])\n",
-    "            fig_elsa.update_traces(textposition='top center', marker=dict(line=dict(width=1, color='DarkSlateGrey')))\n",
-    "            fig_elsa.update_layout(height=280, margin=dict(t=20, b=0, l=0, r=0), template='plotly_white', paper_bgcolor='rgba(0,0,0,0)')\n",
-    "            st.plotly_chart(fig_elsa, use_container_width=True)\n",
-    "        else:\n",
-    "            st.info(\"Insufficient entity data in current news cycle to plot ELSA matrix.\")\n",
-    "\n",
-    "    st.write(\"\")\n",
-    "    st.divider()\n",
-    "\n",
-    "    # --- SECTION 2: 4-Quarter Transcript Engine ---\n",
-    "    st.markdown(\"#### Earnings Call Transcripts & Forward Guidance\")\n",
-    "    \n",
-    "    tabs = st.tabs(list(transcript_insights.keys()))\n",
-    "    \n",
-    "    for i, (quarter, data) in enumerate(transcript_insights.items()):\n",
-    "        with tabs[i]:\n",
-    "            st.write(\"\") # Formatting spacer\n",
-    "            colA, colB = st.columns([1, 1])\n",
-    "            with colA:\n",
-    "                st.markdown(f\"**AI Executive Summary ({quarter}):**\")\n",
-    "                for bullet in data[\"summary\"]:\n",
-    "                    st.markdown(f\"- <span style='color:#4b5563;'>{bullet}</span>\", unsafe_allow_html=True)\n",
-    "                \n",
-    "                with st.expander(\"📄 View Raw Transcript\"):\n",
-    "                    st.write(data[\"raw_text\"])\n",
-    "                    \n",
-    "            with colB:\n",
-    "                st.markdown(f\"**Forward-Looking Statements:**\")\n",
-    "                if not data[\"fls_df\"].empty:\n",
-    "                    # Clean SaaS styling for dataframe\n",
-    "                    st.dataframe(\n",
-    "                        data[\"fls_df\"].style.applymap(\n",
-    "                            lambda v: 'color: #10b981; font-weight:600' if v == 'Positive' else ('color: #ef4444; font-weight:600' if v == 'Negative' else 'color: #6b7280'), \n",
-    "                            subset=['Sentiment']\n",
-    "                        ), \n",
-    "                        use_container_width=True\n",
-    "                    )\n",
-    "                else:\n",
-    "                    st.write(\"No forward-looking statements detected.\")\n",
-    "\n",
-    "    st.divider()\n",
-    "\n",
-    "    # --- SECTION 3: Live Feed ---\n",
-    "    st.markdown(f\"#### Live News Feed Log (Past {horizon} Days)\")\n",
-    "    st.dataframe(\n",
-    "        df_analyzed_news.style.applymap(\n",
-    "            lambda v: 'color: #10b981; font-weight:600' if v == 'Positive' else ('color: #ef4444; font-weight:600' if v == 'Negative' else 'color: #6b7280'), \n",
-    "            subset=['FinBERT Sentiment']\n",
-    "        ), \n",
-    "        use_container_width=True, \n",
-    "        height=350\n",
-    "    )"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3 (ipykernel)",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.13.5"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 5
-}
+import streamlit as st
+import pandas as pd
+import numpy as np
+import eikon as ek
+import plotly.express as px
+import plotly.graph_objects as go
+from transformers import pipeline
+import re
+from datetime import datetime, timedelta
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ==========================================
+# 1. CORE SETUP & CONCALL.IN UI/UX
+# ==========================================
+st.set_page_config(page_title="Corporate Narrative Analyzer", layout="wide", initial_sidebar_state="expanded")
+
+# Modern SaaS / Concall.in Light Theme CSS
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    .stApp { background-color: #f3f4f6; color: #1f2937; font-family: 'Inter', sans-serif; }
+    h1, h2, h3, h4 { color: #111827; font-weight: 600; }
+    
+    /* Clean Card UI for Metrics and Visuals */
+    div[data-testid="metric-container"] {
+        background-color: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 15px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    
+    /* Buttons */
+    .stButton>button { 
+        background-color: #4f46e5; color: white; border-radius: 6px; 
+        font-weight: 500; border: none; transition: 0.2s;
+    }
+    .stButton>button:hover { background-color: #4338ca; color: white; }
+    
+    /* Tabs (Concall.in Style) */
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; background-color: transparent; }
+    .stTabs [data-baseweb="tab"] { 
+        background-color: #ffffff; border: 1px solid #e5e7eb; border-bottom: none;
+        border-radius: 6px 6px 0 0; padding: 10px 20px; color: #6b7280; font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] { 
+        background-color: #f3f4f6; color: #4f46e5; border-top: 3px solid #4f46e5;
+    }
+    
+    /* Dataframes */
+    .dataframe { border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 2. THE AI NLP PIPELINE (CACHED)
+# ==========================================
+@st.cache_resource(show_spinner=False)
+def load_ai_models():
+    """Loads Advanced Hugging Face Transformers into memory."""
+    return {
+        "sentiment": pipeline("sentiment-analysis", model="ProsusAI/finbert"),
+        "summarizer": pipeline("summarization", model="facebook/bart-large-cnn"),
+        "aspect": pipeline("zero-shot-classification", model="facebook/bart-large-mnli"),
+        "ner": pipeline("ner", model="dslim/bert-base-NER", aggregation_strategy="simple")
+    }
+
+# ==========================================
+# 3. DATA EXTRACTION (TIME-BOUND)
+# ==========================================
+@st.cache_data(show_spinner=False)
+def fetch_narrative_data(api_key, ticker, days):
+    end_date = datetime.today()
+    start_date = end_date - timedelta(days=days)
+    
+    try:
+        ek.set_app_key(api_key)
+        df_news = ek.get_news_headlines(
+            query=f"R:{ticker} AND Language:LEN", 
+            date_from=start_date.strftime('%Y-%m-%d'),
+            date_to=end_date.strftime('%Y-%m-%d'),
+            count=100
+        )
+        
+        transcript_raw = ek.get_data(instruments=[ticker], fields=['TR.EventTranscript'])
+        if pd.isna(transcript_raw[0].iloc[0]['EventTranscript']):
+            raise ValueError("Transcript restricted.")
+            
+        return df_news, {"Latest Quarter": str(transcript_raw[0].iloc[0]['EventTranscript'])}
+
+    except Exception as e:
+        # --- MOCK FALLBACK ---
+        st.warning(f"⚠️ Eikon Premium API Access Offline. Booting Simulation Data for {ticker}.")
+        
+        mock_headlines = [
+            f"{ticker} reports surge in OTT subscriber base, offsetting traditional multiplex drops.",
+            f"SEBI regulations delay {ticker}'s proposed network merger by another three months.",
+            f"Analysts upgrade {ticker} following aggressive content acquisition strategy.",
+            f"Ad-revenue challenges in the mid-cap broadcast space continue to pressure {ticker}.",
+            f"Management at {ticker} announces major pivot to direct-to-consumer digital models."
+        ] * (days // 5 + 2)
+        
+        dates = pd.date_range(start=start_date, end=end_date, periods=len(mock_headlines))
+        df_news = pd.DataFrame({"versionCreated": dates, "text": mock_headlines}).set_index("versionCreated")
+        
+        transcripts_4q = {
+            "Q4 (Latest)": f"Good morning. {ticker} had a transformative Q4. Our OTT digital platforms saw a 22% surge in active users, directly cannibalizing traditional linear TV and cinema viewership as we predicted. We are aggressively deploying machine learning algorithms to reduce telecom churn and improve targeted ad-spends. This digital transformation will be our primary revenue driver moving into FY27. However, changes in compliance frameworks regarding our pending merger have created short-term friction.",
+            "Q3": f"Welcome to the Q3 call. Top-line revenue remained flat this quarter. While our traditional broadcast networks faced ad-spend headwinds, our investments in streaming infrastructure are yielding strong cash flow. We anticipate closing the strategic merger by Q4, which will unlock significant synergies in our content library. We plan to aggressively expand our digital footprint in tier-2 cities.",
+            "Q2": f"Q2 was an investment phase for {ticker}. We incurred heavy upfront costs acquiring streaming rights to major sporting events to bolster our OTT offering. We expect these investments to yield high double-digit subscriber growth. We are strictly monitoring our balance sheet and will execute cost-cutting measures in our legacy cinema-distribution arms to fund this digital pivot.",
+            "Q1": f"Starting the fiscal year, {ticker} delivered steady Q1 results. Our legacy media assets provided a strong cash baseline. We have initiated a strategic review of our portfolio to address the rapidly changing entertainment landscape. We project that over the next 12 to 18 months, capital allocation will shift heavily away from traditional cinema and into proprietary digital streaming technologies."
+        }
+        return df_news, transcripts_4q
+
+# ==========================================
+# 4. SIDEBAR CONTROLS
+# ==========================================
+with st.sidebar:
+    st.markdown("### 🔑 LSEG Connect")
+    eikon_key = st.text_input("Eikon API Key", type="password", value="")
+    
+    st.markdown("### 📊 Parameters")
+    ticker_input = st.text_input("NSE Ticker ID", value="ZEEL.NS").upper()
+    horizon = st.selectbox("News Timeline", [7, 30, 90, 180, 365], index=2, format_func=lambda x: f"Last {x} Days")
+    
+    st.caption("Concall Transcripts are strictly locked to Last 4 Quarters.")
+    run_btn = st.button("Analyze Narrative", use_container_width=True)
+    
+    st.divider()
+    with st.expander("🔬 View Quant Methodology"):
+        st.markdown("""
+        **NLP Architecture:**
+        * **Sentiment:** `ProsusAI/finbert` (Trained on 1.8M financial articles).
+        * **Strategic Tagging:** `bart-large-mnli` (Zero-shot classification).
+        * **Entity Linking:** `bert-base-NER` (Filtered for corporate stopwords).
+        * **Summarization:** `bart-large-cnn` (Chunked for token-limit safety).
+        """)
+
+# ==========================================
+# 5. DASHBOARD EXECUTION & NLP
+# ==========================================
+if run_btn:
+    with st.spinner("Processing NLP Pipelines (FinBERT, BART, NER)..."):
+        ai_models = load_ai_models()
+        df_news, transcripts_4q = fetch_narrative_data(eikon_key, ticker_input, horizon)
+
+        if df_news.empty:
+            st.error(f"No news events found for {ticker_input} in the last {horizon} days. Please expand your timeline.")
+            st.stop()
+
+        # ------------------------------------------
+        # FEATURE 1: News Analysis
+        # ------------------------------------------
+        aspect_categories = ["Digital Transformation", "Strategic Mergers", "Regulatory", "Financial Margins"]
+        aspect_counts = {k: 0 for k in aspect_categories}
+        sentiment_data = []
+        entity_sentiment_map = {} 
+        
+        junk_entities = ['The', 'Board', 'Inc', 'Ltd', 'Company', 'Group', 'Management', 'Limited', 'Corp', 'SEBI']
+        
+        for index, row in df_news.iterrows():
+            headline = str(row['text'])
+            date_str = index.strftime('%b %d, %Y') if pd.notnull(index) else "N/A"
+            
+            sent_result = ai_models['sentiment'](headline, truncation=True, max_length=512)[0]
+            label = sent_result['label'].capitalize()
+            score_val = sent_result['score'] if label == 'Positive' else (-sent_result['score'] if label == 'Negative' else 0)
+            
+            aspect_result = ai_models['aspect'](headline, candidate_labels=aspect_categories)
+            dominant_aspect = aspect_result['labels'][0]
+            aspect_counts[dominant_aspect] += 1
+            
+            entities = ai_models['ner'](headline)
+            for e in entities:
+                if e['entity_group'] in ['ORG', 'PER']:
+                    word = e['word'].replace("##", "").strip()
+                    if len(word) > 2 and word not in junk_entities:
+                        if word not in entity_sentiment_map:
+                            entity_sentiment_map[word] = []
+                        entity_sentiment_map[word].append(score_val)
+                
+            sentiment_data.append({
+                "Date": date_str, "Headline": headline, "Strategic Aspect": dominant_aspect,
+                "FinBERT Sentiment": label, "Confidence": f"{sent_result['score']:.2%}"
+            })
+            
+        df_analyzed_news = pd.DataFrame(sentiment_data)
+        
+        entity_records = []
+        for ent, scores in entity_sentiment_map.items():
+            if len(scores) >= 2:
+                entity_records.append({"Entity": ent, "Mentions": len(scores), "Average Sentiment": np.mean(scores)})
+        df_entities = pd.DataFrame(entity_records).sort_values(by="Mentions", ascending=False).head(8)
+
+        # ------------------------------------------
+        # FEATURE 2: 4-Quarter Transcript Engine
+        # ------------------------------------------
+        fls_keywords = ['expect', 'anticipate', 'will', 'future', 'project', 'guidance', 'forecast', 'plan', 'ahead']
+        transcript_insights = {}
+        
+        for quarter, text in transcripts_4q.items():
+            sentences = [s.strip() + '.' for s in re.split(r'(?<=[.!?]) +', text) if len(s.split()) > 5]
+            fls_sentences = [s for s in sentences if any(k in s.lower() for k in fls_keywords)]
+            
+            fls_data = []
+            for s in fls_sentences:
+                res = ai_models['sentiment'](s, truncation=True, max_length=512)[0]
+                fls_data.append({"Statement": s, "Sentiment": res['label'].capitalize()})
+            
+            words = text.split()
+            chunks = [' '.join(words[i:i+400]) for i in range(0, len(words), 400)] 
+            
+            chunk_summaries = []
+            for chunk in chunks[:3]:
+                out = ai_models['summarizer'](chunk, max_length=60, min_length=20, do_sample=False, truncation=True)
+                chunk_summaries.append(out[0]['summary_text'])
+                
+            bullet_points = [s.strip() + '.' for s in " ".join(chunk_summaries).split('.') if len(s.strip()) > 10][:3]
+            
+            transcript_insights[quarter] = {"summary": bullet_points, "fls_df": pd.DataFrame(fls_data), "raw_text": text}
+
+    # ==========================================
+    # 6. UI RENDERING (CONCALL.IN STYLE)
+    # ==========================================
+    st.markdown(f"## {ticker_input} Insights & Analysis")
+    st.caption(f"News: **Last {horizon} Days** • Transcripts: **Last 4 Quarters**")
+    st.write("") 
+
+    # --- SECTION 1: News & Entity Sentiment ---
+    st.markdown("#### Entity & Aspect Intelligence")
+    
+    c1, c2 = st.columns([1, 1.5])
+    with c1:
+        fig_radar = go.Figure(data=go.Scatterpolar(r=list(aspect_counts.values()), theta=list(aspect_counts.keys()), fill='toself', line_color='#4f46e5'))
+        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=False), bgcolor='#ffffff'), margin=dict(t=20, b=20, l=20, r=20), height=280, template='plotly_white', paper_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_radar, use_container_width=True)
+        
+    with c2:
+        if not df_entities.empty:
+            fig_elsa = px.scatter(df_entities, x="Mentions", y="Average Sentiment", text="Entity", size="Mentions", 
+                                  color="Average Sentiment", color_continuous_scale=['#ef4444', '#9ca3af', '#10b981'], range_color=[-1, 1])
+            fig_elsa.update_traces(textposition='top center', marker=dict(line=dict(width=1, color='DarkSlateGrey')))
+            fig_elsa.update_layout(height=280, margin=dict(t=20, b=0, l=0, r=0), template='plotly_white', paper_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_elsa, use_container_width=True)
+        else:
+            st.info("Insufficient entity data in current news cycle to plot ELSA matrix.")
+
+    st.write("")
+    st.divider()
+
+    # --- SECTION 2: 4-Quarter Transcript Engine ---
+    st.markdown("#### Earnings Call Transcripts & Forward Guidance")
+    
+    tabs = st.tabs(list(transcript_insights.keys()))
+    
+    for i, (quarter, data) in enumerate(transcript_insights.items()):
+        with tabs[i]:
+            st.write("")
+            colA, colB = st.columns([1, 1])
+            with colA:
+                st.markdown(f"**AI Executive Summary ({quarter}):**")
+                for bullet in data["summary"]:
+                    st.markdown(f"- <span style='color:#4b5563;'>{bullet}</span>", unsafe_allow_html=True)
+                
+                with st.expander("📄 View Raw Transcript"):
+                    st.write(data["raw_text"])
+                    
+            with colB:
+                st.markdown(f"**Forward-Looking Statements:**")
+                if not data["fls_df"].empty:
+                    st.dataframe(
+                        data["fls_df"].style.applymap(
+                            lambda v: 'color: #10b981; font-weight:600' if v == 'Positive' else ('color: #ef4444; font-weight:600' if v == 'Negative' else 'color: #6b7280'), 
+                            subset=['Sentiment']
+                        ), 
+                        use_container_width=True
+                    )
+                else:
+                    st.write("No forward-looking statements detected.")
+
+    st.divider()
+
+    # --- SECTION 3: Live Feed ---
+    st.markdown(f"#### Live News Feed Log (Past {horizon} Days)")
+    st.dataframe(
+        df_analyzed_news.style.applymap(
+            lambda v: 'color: #10b981; font-weight:600' if v == 'Positive' else ('color: #ef4444; font-weight:600' if v == 'Negative' else 'color: #6b7280'), 
+            subset=['FinBERT Sentiment']
+        ), 
+        use_container_width=True, 
+        height=350
+    )
