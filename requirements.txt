@@ -1,7 +1,7 @@
-torch --index-url https://download.pytorch.org/whl/cpu
+https://download.pytorch.org/whl/cpu/torch-2.2.2%2Bcpu-cp311-cp311-linux_x86_64.whl
+transformers
 streamlit
 pandas
 numpy
 eikon
 plotly
-transformers
